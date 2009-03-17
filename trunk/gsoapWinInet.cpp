@@ -8,7 +8,7 @@ See the header file for details. This file is distributed under the MIT licence.
 #include <wininet.h>
 
 /* gsoap */
-#include <stdsoap2.h>
+#include "stdsoap2.h"
 
 /* local */
 #include "gsoapWinInet.h"
@@ -1039,6 +1039,7 @@ wininet_set_timeout(
     return 0;
 }
 
+/*
 static BOOL
 wininet_flag_set_option(
     HINTERNET   a_hHttpRequest,
@@ -1061,6 +1062,7 @@ wininet_flag_set_option(
             &dwBuffer,
             dwBufferLength);
     }
+#ifdef SOAP_DEBUG
     if ( !bSuccess ) {
         DWORD dwErrorCode = GetLastError();
         DBGLOG(TEST, SOAP_MESSAGE(fdebug, 
@@ -1068,8 +1070,10 @@ wininet_flag_set_option(
             a_hHttpRequest, a_dwOption, dwErrorCode,
             wininet_error_message(soap,dwErrorCode) ));
     }
+#endif
     return bSuccess;
 }
+*/
 
 static BOOL
 wininet_resolve_send_error( 
