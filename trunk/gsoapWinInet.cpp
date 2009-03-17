@@ -1,13 +1,5 @@
 /*
-
-gsoapWinInet.cpp
-
-See the header file for details.
-
-Redistribution: 
-         This code is redistributed as part of the gSOAP software, under the
-         gsoap public license terms and conditions. These conditions are
-         compatible with open source and commercial licensing.
+See the header file for details. This file is distributed under the MIT licence.
 */
 
 /* system */
@@ -212,8 +204,8 @@ wininet_init(
 
 void 
 wininet_set_rse_callback(
-	 struct soap*			soap,
-	 wininet_rse_callback	a_pRsecallback)
+    struct soap *           soap,
+    wininet_rse_callback    a_pRsecallback)
 {
     struct wininet_data * pData = (struct wininet_data *) soap_lookup_plugin( soap, wininet_id );
 
@@ -608,33 +600,42 @@ wininet_fsend(
             switch ( soap->error )
             {
             case ERROR_INTERNET_HTTP_TO_HTTPS_ON_REDIR:
+            case ERROR_INTERNET_HTTPS_TO_HTTP_ON_REDIR:
             case ERROR_INTERNET_INCORRECT_PASSWORD:
             case ERROR_INTERNET_INVALID_CA:
             case ERROR_INTERNET_POST_IS_NON_SECURE:
             case ERROR_INTERNET_SEC_CERT_CN_INVALID:
             case ERROR_INTERNET_SEC_CERT_DATE_INVALID:
-		{
-		wininet_rseReturn errorResolved = rseDisplayDlg;
-		if (pData->pRseCallback)
-			errorResolved = pData->pRseCallback(hHttpRequest, soap->error);
-		if (errorResolved == rseDisplayDlg)
-			errorResolved = (wininet_rseReturn)wininet_resolve_send_error( hHttpRequest, soap->error );
-			if ( errorResolved == rseTrue )
-			{
-				DBGLOG(TEST, SOAP_MESSAGE(fdebug, 
-				"wininet %p: fsend, error %d has been resolved\n", 
-				soap, soap->error ));
-				bRetryPost = TRUE;
-                    /* 
-                        we would have been disconnected by the error. Since we 
-                        are going to try again, we will automatically be 
-                        reconnected. Therefore we want to disregard any 
-                        previous disconnection messages. 
-                     */
-                    		pData->bDisconnect = FALSE; 
-                    		continue;
-			}
+            case ERROR_INTERNET_CLIENT_AUTH_CERT_NEEDED:
+                {
+                wininet_rseReturn errorResolved = rseDisplayDlg;
+                if (pData->pRseCallback)
+                {
+                    errorResolved = pData->pRseCallback(hHttpRequest, soap->error);
                 }
+                if (errorResolved == rseDisplayDlg)
+                {
+                    errorResolved = (wininet_rseReturn)
+                        wininet_resolve_send_error( hHttpRequest, soap->error );
+                    if ( errorResolved == rseTrue )
+                    {
+                        DBGLOG(TEST, SOAP_MESSAGE(fdebug, 
+                            "wininet %p: fsend, error %d has been resolved\n", 
+                            soap, soap->error ));
+                        bRetryPost = TRUE;
+
+                        /* 
+                            we would have been disconnected by the error. Since we 
+                            are going to try again, we will automatically be 
+                            reconnected. Therefore we want to disregard any 
+                            previous disconnection messages. 
+                        */
+                        pData->bDisconnect = FALSE; 
+                        continue;
+                    }
+                }
+                }
+                break;
             }
 
             /* if the error wasn't handled then we exit */
@@ -671,16 +672,21 @@ wininet_fsend(
         {
         case HTTP_STATUS_DENIED:
         case HTTP_STATUS_PROXY_AUTH_REQ:
-	    {
-	    wininet_rseReturn errorResolved = rseDisplayDlg;
-            DBGLOG(TEST, SOAP_MESSAGE(fdebug, 
-                "wininet %p: fsend, user authenication required\n", 
-                soap ));
-	    if (pData->pRseCallback)
-			errorResolved = pData->pRseCallback(hHttpRequest, dwStatusCode);
-	    if (errorResolved == rseDisplayDlg)
-			errorResolved = (wininet_rseReturn)wininet_resolve_send_error( hHttpRequest, ERROR_INTERNET_INCORRECT_PASSWORD );
-	    if ( errorResolved == rseTrue )
+            {
+            wininet_rseReturn errorResolved = rseDisplayDlg;
+                DBGLOG(TEST, SOAP_MESSAGE(fdebug, 
+                    "wininet %p: fsend, user authenication required\n", 
+                    soap ));
+            if (pData->pRseCallback)
+            {
+                errorResolved = pData->pRseCallback(hHttpRequest, dwStatusCode);
+            }
+            if (errorResolved == rseDisplayDlg)
+            {
+                errorResolved = (wininet_rseReturn)
+                    wininet_resolve_send_error( hHttpRequest, ERROR_INTERNET_INCORRECT_PASSWORD );
+            }
+            if ( errorResolved == rseTrue )
             {
                 DBGLOG(TEST, SOAP_MESSAGE(fdebug, 
                     "wininet %p: fsend, authentication has been provided\n", 
@@ -696,7 +702,8 @@ wininet_fsend(
                 bRetryPost = TRUE;
                 continue;
             }
-	    }
+            }
+            break;
         }
     }
 
@@ -889,11 +896,12 @@ wininet_callback(
         DBGLOG(TEST, SOAP_MESSAGE(fdebug,
             "wininet %p: INTERNET_STATUS_HANDLE_CLOSING\n", soap));
         break;
-// Removed to avoid compile errors
-//    case INTERNET_STATUS_DETECTING_PROXY:
-//        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
-//            "wininet %p: INTERNET_STATUS_DETECTING_PROXY\n", soap));
-//        break;
+#ifdef INTERNET_STATUS_DETECTING_PROXY
+    case INTERNET_STATUS_DETECTING_PROXY:
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
+            "wininet %p: INTERNET_STATUS_DETECTING_PROXY\n", soap));
+        break;
+#endif
     case INTERNET_STATUS_REQUEST_COMPLETE:
         DBGLOG(TEST, SOAP_MESSAGE(fdebug,
             "wininet %p: INTERNET_STATUS_REQUEST_COMPLETE\n", soap));
@@ -907,40 +915,52 @@ wininet_callback(
         DBGLOG(TEST, SOAP_MESSAGE(fdebug,
             "wininet %p: INTERNET_STATUS_INTERMEDIATE_RESPONSE\n", soap));
         break;
-// Removed to avoid compile errors
-//    case INTERNET_STATUS_USER_INPUT_REQUIRED:
-//        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
-//            "wininet %p: INTERNET_STATUS_USER_INPUT_REQUIRED\n", soap));
-//        break;
+#ifdef INTERNET_STATUS_USER_INPUT_REQUIRED
+    case INTERNET_STATUS_USER_INPUT_REQUIRED:
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
+            "wininet %p: INTERNET_STATUS_USER_INPUT_REQUIRED\n", soap));
+        break;
+#endif
     case INTERNET_STATUS_STATE_CHANGE:
         DBGLOG(TEST, SOAP_MESSAGE(fdebug,
             "wininet %p: INTERNET_STATUS_STATE_CHANGE\n", soap));
         break;
-// Removed to avoid compile errors
-//    case INTERNET_STATUS_COOKIE_SENT:
-//        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
-//            "wininet %p: INTERNET_STATUS_COOKIE_SENT\n", soap));
-//        break;
-//    case INTERNET_STATUS_COOKIE_RECEIVED:
-//        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
-//            "wininet %p: INTERNET_STATUS_COOKIE_RECEIVED\n", soap));
-//        break;
-//    case INTERNET_STATUS_PRIVACY_IMPACTED:
-//        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
-//            "wininet %p: INTERNET_STATUS_PRIVACY_IMPACTED\n", soap));
-//        break;
-//    case INTERNET_STATUS_P3P_HEADER:
-//        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
-//            "wininet %p: INTERNET_STATUS_P3P_HEADER\n", soap));
-//        break;
-//    case INTERNET_STATUS_P3P_POLICYREF:
-//        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
-//            "wininet %p: INTERNET_STATUS_P3P_POLICYREF\n", soap));
-//        break;
-//    case INTERNET_STATUS_COOKIE_HISTORY:
-//        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
-//            "wininet %p: INTERNET_STATUS_COOKIE_HISTORY\n", soap));
-//        break;
+#ifdef INTERNET_STATUS_COOKIE_SENT
+    case INTERNET_STATUS_COOKIE_SENT:
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
+            "wininet %p: INTERNET_STATUS_COOKIE_SENT\n", soap));
+        break;
+#endif
+#ifdef INTERNET_STATUS_COOKIE_RECEIVED
+    case INTERNET_STATUS_COOKIE_RECEIVED:
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
+            "wininet %p: INTERNET_STATUS_COOKIE_RECEIVED\n", soap));
+        break;
+#endif
+#ifdef INTERNET_STATUS_PRIVACY_IMPACTED
+    case INTERNET_STATUS_PRIVACY_IMPACTED:
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
+            "wininet %p: INTERNET_STATUS_PRIVACY_IMPACTED\n", soap));
+        break;
+#endif
+#ifdef INTERNET_STATUS_P3P_HEADER
+    case INTERNET_STATUS_P3P_HEADER:
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
+            "wininet %p: INTERNET_STATUS_P3P_HEADER\n", soap));
+        break;
+#endif
+#ifdef INTERNET_STATUS_P3P_POLICYREF
+    case INTERNET_STATUS_P3P_POLICYREF:
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
+            "wininet %p: INTERNET_STATUS_P3P_POLICYREF\n", soap));
+        break;
+#endif
+#ifdef INTERNET_STATUS_COOKIE_HISTORY
+    case INTERNET_STATUS_COOKIE_HISTORY:
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug,
+            "wininet %p: INTERNET_STATUS_COOKIE_HISTORY\n", soap));
+        break;
+#endif
     }
 }
 
@@ -1020,6 +1040,38 @@ wininet_set_timeout(
 }
 
 static BOOL
+wininet_flag_set_option(
+    HINTERNET   a_hHttpRequest,
+    DWORD       a_dwOption,
+    DWORD       a_dwFlag )
+{
+    DWORD dwBuffer;
+    DWORD dwBufferLength = sizeof(DWORD);
+
+    BOOL bSuccess = InternetQueryOption(
+        a_hHttpRequest,
+        a_dwOption,
+        &dwBuffer,
+        &dwBufferLength );
+    if (bSuccess) {
+        dwBuffer |= a_dwFlag;
+        bSuccess = InternetSetOption(
+            a_hHttpRequest,
+            a_dwOption,
+            &dwBuffer,
+            dwBufferLength);
+    }
+    if ( !bSuccess ) {
+        DWORD dwErrorCode = GetLastError();
+        DBGLOG(TEST, SOAP_MESSAGE(fdebug, 
+            "wininet %p: failed to set option: %X, error %d (%s)\n",
+            a_hHttpRequest, a_dwOption, dwErrorCode,
+            wininet_error_message(soap,dwErrorCode) ));
+    }
+    return bSuccess;
+}
+
+static BOOL
 wininet_resolve_send_error( 
     HINTERNET   a_hHttpRequest, 
     DWORD       a_dwErrorCode )
@@ -1032,12 +1084,34 @@ wininet_resolve_send_error(
         FLAGS_ERROR_UI_FLAGS_GENERATE_DATA |
         FLAGS_ERROR_UI_FLAGS_CHANGE_OPTIONS,
         NULL );
-    return (a_dwErrorCode == ERROR_INTERNET_INCORRECT_PASSWORD) ?
+    BOOL bRetVal = (a_dwErrorCode == ERROR_INTERNET_INCORRECT_PASSWORD) ?
         (dwResult == ERROR_INTERNET_FORCE_RETRY) :
         (dwResult == ERROR_SUCCESS);
+    /* If appropriate for your application, it is possible to ignore
+       errors in future once they have been handled or ignored once.
+       For example, to ignore invalid SSL certificate dates on this 
+       connection once the client has indicated to ignore them this
+       time, uncomment this code.
+    */
+    /*
+    if (bRetVal)
+    {
+        switch (a_dwErrorCode)
+        {
+        case ERROR_INTERNET_SEC_CERT_CN_INVALID:
+            wininet_flag_set_option(a_hHttpRequest, 
+                INTERNET_OPTION_SECURITY_FLAGS, 
+                SECURITY_FLAG_IGNORE_CERT_CN_INVALID );
+            break;
+        }
+    }
+    */
+    return bRetVal;
+
 }
 
 #ifdef SOAP_DEBUG
+
 static const char *
 wininet_error_message(
     struct soap *   soap,
@@ -1104,4 +1178,5 @@ wininet_free_error_message(
         a_pData->pszErrorMessage = 0;
     }
 }
+
 #endif /* SOAP_DEBUG */
