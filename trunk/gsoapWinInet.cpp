@@ -8,7 +8,7 @@ See the header file for details. This file is distributed under the MIT licence.
 #include <wininet.h>
 
 /* gsoap */
-#include "stdsoap2.h"
+#include <stdsoap2.h>
 
 /* local */
 #include "gsoapWinInet.h"
