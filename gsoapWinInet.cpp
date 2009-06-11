@@ -1148,7 +1148,7 @@ wininet_error_message(
         dwFormatFlags, 
         hModule, 
         a_dwErrorMsgId, 
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
         (LPSTR) &pData->pszErrorMessage,
         0,
         NULL );
