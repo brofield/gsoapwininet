@@ -20,7 +20,6 @@ See the header file for details. This file is distributed under the MIT licence.
 
 #define UNUSED_ARG(x)           (x)
 #define INVALID_BUFFER_LENGTH  ((DWORD)-1)
-typedef unsigned long DWORD_PTR;
 
 /* plugin id */
 static const char wininet_id[] = "wininet-2.0";
