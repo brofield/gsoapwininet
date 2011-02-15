@@ -1,6 +1,6 @@
 /*
 ===============================================================================
-GSOAP WININET PLUGIN
+GSOAP WININET 2.1 PLUGIN
 -------------------------------------------------------------------------------
 
 Allow gsoap clients (not servers) to direct all communications through the 
@@ -55,28 +55,54 @@ have a C project, rename gsoapWinInet2.cpp to .c and use it as is). Ensure
 that you turn off precompiled headers for the .cpp file.
 
 In your source, just after calling soap_init(), register this plugin with 
-soap_register_plugin( soap, wininet_plugin ). 
+soap_register_plugin( soap, wininet_register_logfile ). 
 
 For example:
      struct soap soap;
      soap_init( &soap );
-     soap_register_plugin( &soap, wininet_plugin );
+     soap_register_plugin( &soap, wininet_register_logfile );
      soap.connect_timeout = 5; // this will be used by wininet too
      ...
      soap_done(&soap);
 
 -------------------------------------------------------------------------------
-Notes
+Creating a logfile
 -------------------------------------------------------------------------------
 
-For extra control, you may also register this plugin using the 
-soap_register_plugin_arg() function, and supply as the argument flags which 
-you want to be passed to HttpOpenRequest. 
+A logfile may be created at plugin registration by registering the plugin using
+the wininet_register_logfile function and passing the full path to the logfile
+as the argument. 
 
 For example:
      struct soap soap;
      soap_init( &soap );
-     soap_register_plugin_arg( &soap, wininet_plugin,
+     soap_register_plugin_arg( &soap, wininet_register_logfile,
+         "c:\\Temp\\wininet.log" );
+
+Alternatively, the logfile can be set or changed after registration using the
+wininet_setlog() function. Since some settings may have already been set by 
+the time wininet_setlog is called, it is recommended that the logfile is 
+created at registration.
+
+-------------------------------------------------------------------------------
+Adding extra flags
+-------------------------------------------------------------------------------
+
+Extra flags can be passed to HttpOpenRequest by calling the wininet_setflags 
+function after the plugin is registered. Alternatively, wininet_register_flags
+can be used as the plugin registration function. However the wininet_setflags
+function is recommended.
+
+For example:
+     struct soap soap;
+     soap_init( &soap );
+     soap_register_plugin_arg( &soap, wininet_register_logfile, NULL);
+     wininet_setflags( &soap, INTERNET_FLAG_IGNORE_CERT_CN_INVALID );
+
+Alternatively (not recommended):         
+     struct soap soap;
+     soap_init( &soap );
+     soap_register_plugin_arg( &soap, wininet_register_flags,
          (void*) INTERNET_FLAG_IGNORE_CERT_CN_INVALID );
 
 See the MSDN documentation on HttpOpenRequest for details of available flags. 
@@ -88,6 +114,7 @@ INTERNET_FLAG_KEEP_CONNECTION
      Uses keep-alive semantics, if available, for the connection. 
      This flag is required for Microsoft Network (MSN), NT LAN 
      Manager (NTLM), and other types of authentication. 
+
      ++ Note that this flag is used automatically when soap.omode 
      has the SOAP_IO_KEEPALIVE flag set. ++
 
@@ -155,16 +182,20 @@ Developers
 -------------------------------------------------------------------------------
 
 26 May 2003: Jack Kustanowitz (jackk@atomica.com)
-Original version
+    Original version
 
 29 September 2003: Brodie Thiesfield (code@jellycan.com)
-Rewritten as C plugin for gsoap. Bugs fixed and features added.
+    Rewritten as C plugin for gsoap. Bugs fixed and features added.
 
 14 January 2004: Brodie Thiesfield (code@jellycan.com)
-Bug fix.
+    Bug fix.
 
 17 March 2009: Brodie Thiesfield (code@jellycan.com)
-Clean up and re-release.
+    Clean up and re-release.
+
+10 February 2011: Brodie Thiesfield (code@jellycan.com)
+    Rewrite, fix some bugs, clean up the code, add full (optional) logging 
+    even in release builds, ensure that no-cache flags are used.
 */
 
 #ifndef INCLUDED_gsoapWinInet2_h
@@ -177,17 +208,31 @@ Clean up and re-release.
 extern "C" {
 #endif 
 
+/*! possible results from the RSE callback */
 typedef enum {
-    rseFalse = 0,
-    rseTrue,
-    rseDisplayDlg
+    rseFalse = 0,   /*!< failed to resolve the error */
+    rseTrue,        /*!< error has been resolved, retry the request */
+    rseDisplayDlg   /*!< display the standard Windows dialog */
 } wininet_rseReturn;
 
-typedef wininet_rseReturn(*wininet_rse_callback)(HINTERNET a_hHttpRequest, DWORD a_dwErrorCode);
+/*! RSE callback signature */
+typedef wininet_rseReturn (*wininet_rse_callback)(HINTERNET a_hHttpRequest, DWORD a_dwErrorCode);
 
+/*! set the ResolveSendError callback to the used. This can be used to resolve errors manually
+    without using the built-in Windows dialogs. */
 extern void wininet_set_rse_callback(struct soap *a_pSoap, wininet_rse_callback a_pRseCallback);
 
-extern int wininet_plugin(struct soap *a_pSoap, struct soap_plugin *a_pPluginData, void *a_pUnused);
+/*! register the plugin and set an optional logfile */
+extern int wininet_register_logfile(struct soap *a_pSoap, struct soap_plugin *a_pPluginData, void *a_pLogFile);
+
+/*! set or cancel the logfile after plugin registration */
+extern int wininet_setlog(struct soap * soap, const char * a_pLogFile);
+
+/*! register the plugin and set extra flags */
+extern int wininet_register_flags(struct soap *a_pSoap, struct soap_plugin *a_pPluginData, void *a_dwRequestFlags);
+
+/*! set the extra flags after plugin registration */
+extern int wininet_setflags(struct soap * soap, DWORD a_dwRequestFlags);
 
 #ifdef __cplusplus
 }
