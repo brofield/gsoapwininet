@@ -86,8 +86,10 @@ wininet_log_data(
     const size_t            a_nBufLen
     )
 {
-    const size_t cols = 24;
-    char line[7 + cols*3 + cols/3 + 2 + cols + 2]; /* offset + hex + space + space + ascii + LF NUL */
+#define cols        24
+#define linelen     (7 + cols*3 + cols/3 + 2 + cols + 2) /* offset + hex + space + space + ascii + LF NUL */
+
+    char line[linelen]; 
     const unsigned char * pBuf = (const unsigned char *) a_pBuf;
     const char hex[] = "0123456789abcdef";
     size_t n, idx = 0;
@@ -97,8 +99,8 @@ wininet_log_data(
 
     wininet_log(a_pData, "%s (%ld bytes):\n", a_pInfo, a_nBufLen);
     while (idx < a_nBufLen) {
-        memset(line, ' ', sizeof(line)-2);
         size_t count = idx + cols > a_nBufLen ? a_nBufLen - idx : cols;
+        memset(line, ' ', sizeof(line)-2);
         for (n = 0; n < count; ++n) {
             register unsigned char ch = pBuf[idx+n];
             line[0] = '0' + ((idx / 10000) % 10);
@@ -892,8 +894,8 @@ wininet_fsend(
             /* ensure we have a buffer large enough for this chunksize 
                buffer, plus the next chunk of actual data, and a few extra 
                bytes for the final "0" chunksize block. */
-            _ASSERTE(a_uiBufferLen > 0);
             size_t uiChunkSize = strtoul(a_pBuffer, NULL, 16);
+            _ASSERTE(a_uiBufferLen > 0);
             pData->uiBufferLenMax = uiChunkSize + a_uiBufferLen + 16;
         }
 
