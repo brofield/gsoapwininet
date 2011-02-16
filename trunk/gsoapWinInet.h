@@ -133,6 +133,7 @@ This plugin uses the following callback functions and is not compatible
 with any other plugin that uses these functions.
 
      soap->fopen
+     soap->fpoll
      soap->fposthdr
      soap->fsend
      soap->frecv
@@ -201,8 +202,8 @@ Developers
 #ifndef INCLUDED_gsoapWinInet2_h
 #define INCLUDED_gsoapWinInet2_h
 
-#include <stdsoap2.h>
 #include <wininet.h>
+#include <stdsoap2.h>
 
 #ifdef __cplusplus
 extern "C" {
