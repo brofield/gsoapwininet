@@ -359,8 +359,8 @@ wininet_callback(
 
     switch (dwInternetStatus) {
     case INTERNET_STATUS_RESOLVING_NAME:
-        WININET_LOG1(pData, "callback: INTERNET_STATUS_RESOLVING_NAME: %S", 
-            (const wchar_t *) lpvStatusInformation);
+        WININET_LOG1(pData, "callback: INTERNET_STATUS_RESOLVING_NAME: %s", 
+            (const char *) lpvStatusInformation);
         break;
     case INTERNET_STATUS_NAME_RESOLVED:
         WININET_LOG1(pData, "callback: INTERNET_STATUS_NAME_RESOLVED: %s", 
@@ -1198,7 +1198,7 @@ wininet_register(
     }
 
     /* set up the callback function so we get notifications */
-    InternetSetStatusCallback(pData->hInternet, wininet_callback);
+    InternetSetStatusCallbackA(pData->hInternet, wininet_callback);
 
     /* set all of our callbacks */
     soap->fopen    = wininet_fopen;
