@@ -33,27 +33,43 @@ enum LogFormat { LOGTYPE_UNKNOWN, LOGTYPE_TEXT, LOGTYPE_XML, LOGTYPE_HEX };
 
 struct wininet_data
 {
-    HINTERNET            hInternet;          /* internet session handle */
-    HINTERNET            hConnection;        /* current connection handle */
-    HINTERNET            hRequest;           /* current request handle */
-    BOOL                 bDisconnect;        /* connection is disconnected */
-    DWORD                dwRequestFlags;     /* extra request flags from user */
-    char *               pUrlPath;           /* current URL path to use */
-    char *               pszErrorMessage;    /* wininet/system error message */
-    char *               pUserAgent;         /* user agent header */
-    char *               pBuffer;            /* send buffer */
-    size_t               uiBufferSize;       /* current size of the buffer */
-    size_t               uiBufferLenMax;     /* total length of the message */
-    size_t               uiBufferLen;        /* length of data in buffer */
-    BOOL                 bIsChunkSize;       /* expecting a chunk size buffer */
-    enum LogFormat       nLogFormat;         /* log data format */
-    wininet_rse_callback pRseCallback;       /* wininet_resolve_send_error callback.  Allows clients to resolve ssl errors programatically */
-    FILE *               hLog;               /* debug log file */
+    HINTERNET            hInternet;         /* internet session handle */
+    HINTERNET            hConnection;       /* current connection handle */
+    HINTERNET            hRequest;          /* current request handle */
+    BOOL                 bDisconnect;       /* connection is disconnected */
+    DWORD                dwRequestFlags;    /* extra request flags from user */
+    char *               pUrlPath;          /* current URL path to use */
+    char *               pszErrorMessage;   /* wininet/system error message */
+    char *               pUserAgent;        /* user agent header */
+    char *               pBuffer;           /* send buffer */
+    size_t               uiBufferSize;      /* current size of the buffer */
+    size_t               uiBufferLenMax;    /* total length of the message */
+    size_t               uiBufferLen;       /* length of data in buffer */
+    BOOL                 bIsChunkSize;      /* expecting a chunk size buffer */
+    enum LogFormat       nLogFormat;        /* log data format */
+    wininet_rse_callback pRseCallback;      /* wininet_resolve_send_error callback.  Allows clients to resolve ssl errors programatically */
+    FILE *               hLog;              /* debug log file */
 };
 
 /*=============================================================================
   Local Functions
  ============================================================================*/
+
+/*  create an incrementing semi-random, semi-unique value to use in request 
+    headers. It doesn't matter if this is really unique or random, it just
+    provides a reference for matching debug logs together. It is assumed that 
+    srand() has been called. */
+static void
+wininet_getreqid(
+    char * aBuf,
+    size_t aBufSiz
+    )
+{
+    static LONG counter = (LONG) GetTickCount();
+    LONG curr = InterlockedIncrement(&counter);
+    _snprintf(aBuf, aBufSiz, "%lX%lX%lX", 
+        (ULONG)GetCurrentProcessId(), (ULONG)rand(), (ULONG)curr);
+}
 
 /* NOTE: call via the WININET_LOGx macros for checking of a_pData */
 static void
@@ -1061,19 +1077,6 @@ wininet_fposthdr(
 
     soap->error = SOAP_OK;
 
-    if (a_pszKey && a_pszValue) {
-        if (!strcmp(a_pszKey, "User-Agent") && pData->pUserAgent) {
-            a_pszValue = pData->pUserAgent;
-        }
-        WININET_LOG2(pData, "fposthdr: header '%s: %s'", a_pszKey, a_pszValue);
-    }
-    else if (a_pszKey) {
-        WININET_LOG0(pData, "fposthdr: initialize request");
-    }
-    else { 
-        WININET_LOG0(pData, "fposthdr: complete headers");
-    }
-
     /* ensure that our connection hasn't been disconnected */
     if (!wininet_have_connection(soap, pData)) {
         return SOAP_EOF;
@@ -1081,6 +1084,8 @@ wininet_fposthdr(
 
     /* initialize a new request */
     if (a_pszKey && !a_pszValue) {
+        WININET_LOG0(pData, "fposthdr: initialize request");
+
         /* if we are using chunk output then we start with a chunk size */
         pData->bIsChunkSize = ((soap->omode & SOAP_IO) == SOAP_IO_CHUNK);
         pData->uiBufferLen = 0;
@@ -1091,11 +1096,39 @@ wininet_fposthdr(
         rc = wininet_create_request(soap);
         if (rc != SOAP_OK) return rc;
 
-        return SOAP_OK; 
+        return SOAP_OK;
+    }
+
+    /* completed request headers */
+    if (!a_pszKey) {
+        WININET_LOG0(pData, "fposthdr: complete headers");
+        return SOAP_OK;
     }
 
     /* add a header */
     if (a_pszValue) { 
+        char szTemp[200];
+
+        if (!strcmp(a_pszKey, "User-Agent")) {
+            if (pData->pUserAgent) {
+                a_pszValue = pData->pUserAgent;
+            }
+
+            /* so that the request id shows up in IIS logs, add the request ID to the user agent */
+            if (pData->hLog) {
+                char szRequestId[50];
+                wininet_getreqid(szRequestId, sizeof(szRequestId));
+                nLen = _snprintf(szTemp, sizeof(szTemp), "%s [%s]", a_pszValue, szRequestId);
+                if (nLen < 0) {
+                    WININET_LOG0(pData, "fposthdr: EOM");
+                    return SOAP_EOM;
+                }
+                a_pszValue = szTemp;
+            }
+        }
+        
+        WININET_LOG2(pData, "fposthdr: header '%s: %s'", a_pszKey, a_pszValue);
+
         /* determine the maximum length of this message so that we can
            correctly determine when we have completed the send */
         if (!strcmp(a_pszKey, "Content-Length")) {
@@ -1124,7 +1157,7 @@ wininet_fposthdr(
             }
         }
 
-        nLen = _snprintf(szHeader, 4096, "%s: %s\r\n", a_pszKey, a_pszValue);
+        nLen = _snprintf(szHeader, sizeof(szHeader), "%s: %s\r\n", a_pszKey, a_pszValue);
         if (nLen < 0) {
             WININET_LOG0(pData, "fposthdr: EOM");
             return SOAP_EOM;
