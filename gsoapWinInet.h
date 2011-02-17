@@ -40,7 +40,6 @@ Features
 -------------------------------------------------------------------------------
 Limitations
 -------------------------------------------------------------------------------
- - DIME attachments are not supported
  - may internally buffer the entire outgoing message before sending
      (if the serialized message is larger then SOAP_BUFLEN, or if 
      SOAP_IO_CHUNK mode is being used then the entire message will 
@@ -55,12 +54,12 @@ have a C project, rename gsoapWinInet2.cpp to .c and use it as is). Ensure
 that you turn off precompiled headers for the .cpp file.
 
 In your source, just after calling soap_init(), register this plugin with 
-soap_register_plugin( soap, wininet_register_logfile ). 
+soap_register_plugin( soap, wininet_register ). 
 
 For example:
      struct soap soap;
      soap_init( &soap );
-     soap_register_plugin( &soap, wininet_register_logfile );
+     soap_register_plugin( &soap, wininet_register );
      soap.connect_timeout = 5; // this will be used by wininet too
      ...
      soap_done(&soap);
@@ -69,41 +68,39 @@ For example:
 Creating a logfile
 -------------------------------------------------------------------------------
 
-A logfile may be created at plugin registration by registering the plugin using
-the wininet_register_logfile function and passing the full path to the logfile
-as the argument. 
+A logfile may be created at plugin registration by passing the full path to 
+the logfile as the argument. The logfile will contain details of all calls, 
+callbacks, data and status updates received by the plugin.
 
 For example:
      struct soap soap;
      soap_init( &soap );
-     soap_register_plugin_arg( &soap, wininet_register_logfile,
+     soap_register_plugin_arg( &soap, wininet_register,
          "c:\\Temp\\wininet.log" );
+
+The logfile can be set to NULL or an empty string to disable logging.
 
 Alternatively, the logfile can be set or changed after registration using the
 wininet_setlog() function. Since some settings may have already been set by 
 the time wininet_setlog is called, it is recommended that the logfile is 
 created at registration.
 
+Note that if the log file cannot be created then no error is generated. In 
+particular, if the gsoap plugin is running in the context of IE protected mode
+then note that only some directories are writable (FOLDERID_LocalAppDataLow).
+
 -------------------------------------------------------------------------------
 Adding extra flags
 -------------------------------------------------------------------------------
 
 Extra flags can be passed to HttpOpenRequest by calling the wininet_setflags 
-function after the plugin is registered. Alternatively, wininet_register_flags
-can be used as the plugin registration function. However the wininet_setflags
-function is recommended.
+function after the plugin is registered. 
 
 For example:
      struct soap soap;
      soap_init( &soap );
-     soap_register_plugin_arg( &soap, wininet_register_logfile, NULL);
+     soap_register_plugin( &soap, wininet_register );
      wininet_setflags( &soap, INTERNET_FLAG_IGNORE_CERT_CN_INVALID );
-
-Alternatively (not recommended):         
-     struct soap soap;
-     soap_init( &soap );
-     soap_register_plugin_arg( &soap, wininet_register_flags,
-         (void*) INTERNET_FLAG_IGNORE_CERT_CN_INVALID );
 
 See the MSDN documentation on HttpOpenRequest for details of available flags. 
 The <wininet.h> header file is required for the definitions of the flags. 
@@ -129,8 +126,12 @@ INTERNET_FLAG_IGNORE_CERT_DATE_INVALID
      Disables Win32 Internet function checking of SSL/PCT-based 
      certificates for proper validity dates.
 
-This plugin uses the following callback functions and is not compatible 
-with any other plugin that uses these functions.
+-------------------------------------------------------------------------------
+Using other plugins
+-------------------------------------------------------------------------------
+
+This plugin uses the following callback functions and is most likely not going
+to be compatible with any other plugin that uses these functions.
 
      soap->fopen
      soap->fpoll
@@ -139,18 +140,44 @@ with any other plugin that uses these functions.
      soap->frecv
      soap->fclose
 
-If there are errors in sending the HTTP request which would cause a dialog 
-box to be displayed in IE (for instance, invalid certificates on an HTTPS 
-connection), then a dialog will also be displayed by this library. At the 
-moment is is not possible to disable the UI. If you wish to remove the UI 
-then you will need to hack the source to remove the dialog box and resolve the
-errors programmatically, or supply the appropriate flags in 
-soap_register_plugin_arg() to disable the unwanted warnings.
+The only function that may be modified is the soap->fposthdr function. To 
+override this function, replace it with the customized version after the 
+wininet plugin has been registered, and make sure that you call the original
+soap->fposthdr function from your own.
 
-Because messages are buffered internally to gsoapWinInet2 plugin it is 
-recommended that the SOAP_IO_STORE flag is not used otherwise the message may 
+For example:
+
+     struct soap soap;
+     soap_init( &soap );
+     soap_register_plugin( &soap, wininet_register );
+     orig_fposthdr = soap.fposthdr;
+     soap.fposthdr = my_fposthdr;
+
+    int my_fposthdr(struct soap *soap, const char *key, const char *val) {
+        // my processing
+        return orig_fposthdr(soap, key, val);
+    }
+
+-------------------------------------------------------------------------------
+Memory Usage
+-------------------------------------------------------------------------------
+
+All messages are buffered internally to gsoapWinInet2 plugin it is 
+recommended that the SOAP_IO_STORE flag is not used otherwise the message will
 be buffered twice on every send. Use the default flag SOAP_IO_BUFFER, 
 or SOAP_IO_FLUSH.
+
+-------------------------------------------------------------------------------
+Error Handling
+-------------------------------------------------------------------------------
+
+If there are errors in sending the HTTP request which would cause a dialog 
+box to be displayed in IE (for instance, invalid certificates on an HTTPS 
+connection), then by default, a dialog will also be displayed by this library. 
+
+To disable the dialog, supply your own custom error resolving callback using 
+wininet_set_rse_callback() function. It is possible to disable some warning
+dialogs by setting the appropriate flags with wininet_setflags().
 
 -------------------------------------------------------------------------------
 License 
@@ -159,7 +186,7 @@ License
 The licence text below is the boilerplate "MIT Licence" used from:
 http://www.opensource.org/licenses/mit-license.php
 
-Copyright (c) 2009, Brodie Thiesfield
+Copyright (c) 2009-2011, Brodie Thiesfield
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -209,6 +236,23 @@ Developers
 extern "C" {
 #endif 
 
+/*! register the plugin and optionally set a logfile.
+    NOTE: flags cannot be set using the registration function now. Use the 
+    wininet_setflags() function! 
+ */
+extern int wininet_register(struct soap *a_pSoap, struct soap_plugin *a_pPluginData, void *a_pLogFile);
+
+/*! set or cancel the logfile after plugin registration. Set to NULL or empty string
+    to disable logging. */
+extern int wininet_setlog(struct soap * soap, const char * a_pLogFile);
+
+/*! set the extra flags after plugin registration. Set to 0 for default flags. */
+extern int wininet_setflags(struct soap * soap, DWORD a_dwRequestFlags);
+
+/*! set or cancel the string to send as the User-Agent header. Set to NULL to use the
+    default supplied. */
+extern int wininet_setagent(struct soap * soap, const char * a_pUserAgent);
+
 /*! possible results from the RSE callback */
 typedef enum {
     rseFalse = 0,   /*!< failed to resolve the error */
@@ -221,19 +265,7 @@ typedef wininet_rseReturn (*wininet_rse_callback)(HINTERNET a_hHttpRequest, DWOR
 
 /*! set the ResolveSendError callback to the used. This can be used to resolve errors manually
     without using the built-in Windows dialogs. */
-extern void wininet_set_rse_callback(struct soap *a_pSoap, wininet_rse_callback a_pRseCallback);
-
-/*! register the plugin and set an optional logfile */
-extern int wininet_register_logfile(struct soap *a_pSoap, struct soap_plugin *a_pPluginData, void *a_pLogFile);
-
-/*! set or cancel the logfile after plugin registration */
-extern int wininet_setlog(struct soap * soap, const char * a_pLogFile);
-
-/*! register the plugin and set extra flags */
-extern int wininet_register_flags(struct soap *a_pSoap, struct soap_plugin *a_pPluginData, void *a_dwRequestFlags);
-
-/*! set the extra flags after plugin registration */
-extern int wininet_setflags(struct soap * soap, DWORD a_dwRequestFlags);
+extern int wininet_set_rse_callback(struct soap *a_pSoap, wininet_rse_callback a_pRseCallback);
 
 #ifdef __cplusplus
 }
