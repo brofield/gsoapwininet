@@ -29,6 +29,8 @@
 #define WININET_VERSION "wininet-2.1"
 static const char wininet_id[] = WININET_VERSION;
 
+enum LogFormat { LOGTYPE_UNKNOWN, LOGTYPE_TEXT, LOGTYPE_XML, LOGTYPE_HEX };
+
 struct wininet_data
 {
     HINTERNET            hInternet;          /* internet session handle */
@@ -37,13 +39,15 @@ struct wininet_data
     BOOL                 bDisconnect;        /* connection is disconnected */
     DWORD                dwRequestFlags;     /* extra request flags from user */
     char *               pUrlPath;           /* current URL path to use */
+    char *               pszErrorMessage;    /* wininet/system error message */
+    char *               pUserAgent;         /* user agent header */
     char *               pBuffer;            /* send buffer */
     size_t               uiBufferSize;       /* current size of the buffer */
     size_t               uiBufferLenMax;     /* total length of the message */
     size_t               uiBufferLen;        /* length of data in buffer */
     BOOL                 bIsChunkSize;       /* expecting a chunk size buffer */
+    enum LogFormat       nLogFormat;         /* log data format */
     wininet_rse_callback pRseCallback;       /* wininet_resolve_send_error callback.  Allows clients to resolve ssl errors programatically */
-    char *               pszErrorMessage;    /* wininet/system error message */
     FILE *               hLog;               /* debug log file */
 };
 
@@ -74,14 +78,13 @@ wininet_log(
     vfprintf(a_pData->hLog, a_pFormat, args);
     fputc('\n', a_pData->hLog);
 
-    fflush(a_pData->hLog); // as it is a debug log, flush it always
+    fflush(a_pData->hLog); /* as it is a debug log, flush it always */
 }
 
-/* log data as hex dumps */
+/* hex */
 static void
-wininet_log_data(
+wininet_log_data_hex(
     struct wininet_data *   a_pData,
-    const char *            a_pInfo,
     const void *            a_pBuf,
     const size_t            a_nBufLen
     )
@@ -97,7 +100,6 @@ wininet_log_data(
     line[sizeof(line)-1] = 0;
     line[sizeof(line)-2] = '\n';
 
-    wininet_log(a_pData, "%s (%ld bytes):\n", a_pInfo, a_nBufLen);
     while (idx < a_nBufLen) {
         size_t count = idx + cols > a_nBufLen ? a_nBufLen - idx : cols;
         memset(line, ' ', sizeof(line)-2);
@@ -111,11 +113,275 @@ wininet_log_data(
             line[5] = ':';
             line[7+n*3+0+n/8] = hex[ch >> 4];
             line[7+n*3+1+n/8] = hex[ch & 0xF];
-            line[7+3+cols*3+2+n] = ch > 32 && ch < 127 ? ch : '.';
+            line[7+3+cols*3+2+n] = ch >= 32 && ch < 127 ? ch : '.';
         }
         idx += count;
         fwrite(line, 1, sizeof(line)-1, a_pData->hLog);
     }
+
+#undef linelen
+#undef cols
+}
+
+/* wrapped text */
+static void
+wininet_log_data_text(
+    struct wininet_data *   a_pData,
+    const void *            a_pBuf,
+    const size_t            a_nBufLen
+    )
+{
+    size_t len, idx;
+    const unsigned char * pBuf = (const unsigned char *) a_pBuf;
+    const unsigned char * pBufEnd = pBuf + a_nBufLen;
+
+    while (pBuf < pBufEnd) {
+        const size_t linelen = 120;
+        for (len = idx = 0; len < linelen && pBuf + idx < pBufEnd; ++idx, ++len) {
+            if (pBuf[idx] == '\n') len = 0;
+        }
+        fwrite(pBuf, 1, idx, a_pData->hLog);
+        fputc('\n', a_pData->hLog);
+        pBuf += idx;
+    }
+}
+
+typedef enum XmlItemType_t {
+    XMLTYPE_TEXT,
+    XMLTYPE_OPEN,
+    XMLTYPE_CLOSE, 
+    XMLTYPE_OTHER   /* e.g. XMLPI, self-closing, things that don't change the indent */
+} XmlItemType;
+
+typedef struct XmlItem_t
+{
+    XmlItemType     nType;
+    const char *    pStart;
+    unsigned        nLen;
+    BOOL            nNewLine;
+    BOOL            nSplitAttribs;
+} XmlItem;
+
+static BOOL
+wininet_parsexml(
+    const char * a_pBuf,
+    const char * a_pBufEnd,
+    XmlItem *    a_pItem
+    )
+{
+    unsigned char ch;
+
+    if (a_pBuf >= a_pBufEnd) {
+        return FALSE;
+    }
+    a_pItem->pStart = a_pBuf;
+    a_pItem->nNewLine = FALSE;
+    a_pItem->nSplitAttribs = FALSE;
+
+    /* text starts if we are not a tag */
+    if (*a_pBuf != '<') {
+        a_pItem->nType = XMLTYPE_TEXT;
+        while (a_pBuf < a_pBufEnd && *a_pBuf != '<') ++a_pBuf;
+        a_pItem->nLen = a_pBuf - a_pItem->pStart;
+        a_pItem->nNewLine = (*(a_pBuf-1) == '\n');
+        return TRUE;
+    }
+
+    a_pItem->nType = XMLTYPE_OPEN;
+    while (a_pBuf < a_pBufEnd && *a_pBuf != '>') ++a_pBuf;
+    a_pItem->nLen = a_pBuf - a_pItem->pStart;
+    if (a_pBuf < a_pBufEnd) ++a_pItem->nLen; /* include the tag end */
+
+    /* anything that doesn't look like a tag is text */
+    if (a_pItem->pStart + 2 >= a_pBuf || a_pBuf >= a_pBufEnd) {
+        a_pItem->nType = XMLTYPE_TEXT;
+        return TRUE;
+    }
+
+    /* look for a closing tag */
+    ch = *(a_pItem->pStart+1);
+    if (ch == '/') {
+        a_pItem->nType = XMLTYPE_CLOSE;
+        return TRUE;
+    }
+
+    /* look for a self-closing or XMLPI tag */
+    ch = *(a_pBuf-1);
+    if (ch == '/' || ch == '?') {
+        a_pItem->nType = XMLTYPE_OTHER;
+        return TRUE;
+    }
+
+    /* look for the soap envelope to mark it for splitting attribs to a new line */
+#define SOAP_ENVELOPE "<SOAP-ENV:Envelope "
+    if (a_pItem->nLen > sizeof(SOAP_ENVELOPE) 
+        && !strnicmp(a_pItem->pStart, SOAP_ENVELOPE, sizeof(SOAP_ENVELOPE)-1)) 
+    {
+        a_pItem->nSplitAttribs = TRUE;
+    }
+
+    return TRUE;
+}
+
+static BOOL
+wininet_haschild(
+    const char * a_pBuf,
+    const char * a_pBufEnd
+    )
+{
+    XmlItem item;
+    while (wininet_parsexml(a_pBuf, a_pBufEnd, &item)) {
+        a_pBuf = item.pStart + item.nLen;
+        if (item.nType == XMLTYPE_OPEN) return TRUE;
+        if (item.nType == XMLTYPE_CLOSE) return FALSE;
+    }
+    return FALSE;
+}
+
+static void 
+wininet_indent(
+    struct wininet_data *   a_pData,
+    int                     a_nIndent
+    )
+{
+    char line[400];
+    int len;
+
+    if (a_nIndent < 1) return;
+    for (len = 0; len < a_nIndent; ++len) {
+        line[len] = ' ';
+    }
+    line[len] = 0;
+    fwrite(line, 1, len, a_pData->hLog);
+}
+
+static void
+wininet_writetag(
+    struct wininet_data *   a_pData,
+    XmlItem *               a_pItem,
+    int                     a_nIndent
+    )
+{
+    const char * pCurr;
+    const char * pBuf    = a_pItem->pStart;
+    const char * pBufEnd = pBuf + a_pItem->nLen;
+
+    // wrap text at a maximum line length
+    if (a_pItem->nType == XMLTYPE_TEXT) {
+        const size_t linelen = 120;
+        size_t len, idx;
+
+        while (pBuf < pBufEnd) {
+            for (len = idx = 0; len < linelen && pBuf + idx < pBufEnd; ++idx, ++len) {
+                if (pBuf[idx] == '\n') len = 0;
+            }
+            fwrite(pBuf, 1, idx, a_pData->hLog);
+            pBuf += idx;
+            if (pBuf < pBufEnd) {
+                fputc('\n', a_pData->hLog);
+                wininet_indent(a_pData, a_nIndent);
+            }
+        }
+        return;
+    }
+
+    if (!a_pItem->nSplitAttribs) {
+        fwrite(a_pItem->pStart, 1, a_pItem->nLen, a_pData->hLog);
+        return;
+    }
+
+    // find the first attribute
+    for (pCurr = pBuf; pCurr < pBufEnd && *pCurr != ' '; ++pCurr);
+    for (; pCurr < pBufEnd && *pCurr == ' '; ++pCurr);
+    fwrite(pBuf, 1, pCurr - pBuf, a_pData->hLog);
+    
+    a_nIndent += 4;
+    pBuf = pCurr;
+    while (pBuf < pBufEnd) {
+        // find end of attrib
+        for (; pCurr < pBufEnd && *pCurr != '='; ++pCurr);
+        if (pCurr < pBufEnd && *pCurr == '=') {
+            ++pCurr;
+            if (pCurr < pBufEnd && *pCurr == '"') {
+                for (++pCurr; pCurr < pBufEnd && *pCurr != '"'; ++pCurr);
+            }
+            if (pCurr < pBufEnd && *pCurr == '"') ++pCurr;
+        }
+        if (pCurr < pBufEnd && *pCurr == ' ') ++pCurr;
+        if (pCurr < pBufEnd && *pCurr == '>') ++pCurr;
+
+        // output this attrib
+        fputc('\n', a_pData->hLog);
+        wininet_indent(a_pData, a_nIndent);
+        fwrite(pBuf, 1, pCurr - pBuf, a_pData->hLog);
+        pBuf = pCurr;
+    }
+}
+
+/* pretty xml */
+static void
+wininet_log_data_xml(
+    struct wininet_data *   a_pData,
+    const void *            a_pBuf,
+    const size_t            a_nBufLen
+    )
+{
+    const char * pBuf = (const char *) a_pBuf;
+    const char * pBufEnd = pBuf + a_nBufLen;
+    XmlItem item;
+    int indent = 0;
+    BOOL skipNewLine = FALSE;
+
+    while (wininet_parsexml(pBuf, pBufEnd, &item)) {
+        pBuf = item.pStart + item.nLen;
+
+        if (item.nType == XMLTYPE_CLOSE) {
+            indent -= 2;
+        }
+        if (!skipNewLine) {
+            wininet_indent(a_pData, indent);
+        }
+        if (item.nType == XMLTYPE_CLOSE) {
+            skipNewLine = FALSE;
+        }
+        wininet_writetag(a_pData, &item, indent);
+        if (item.nType == XMLTYPE_OPEN) {
+            indent += 2;
+            if (!wininet_haschild(pBuf, pBufEnd)) {
+                skipNewLine = TRUE;
+            }
+        }
+        if (!item.nNewLine && !skipNewLine) {
+            fputc('\n', a_pData->hLog);
+        }
+    }
+}
+
+/* log data as hex dumps */
+static void
+wininet_log_data(
+    struct wininet_data *   a_pData,
+    const char *            a_pInfo,
+    const void *            a_pBuf,
+    const size_t            a_nBufLen
+    )
+{
+    wininet_log(a_pData, "%s (%ld bytes):\n", a_pInfo, a_nBufLen);
+
+    switch (a_pData->nLogFormat) {
+    case LOGTYPE_XML:
+        wininet_log_data_xml(a_pData, a_pBuf, a_nBufLen);
+        break;
+    case LOGTYPE_TEXT:
+        wininet_log_data_text(a_pData, a_pBuf, a_nBufLen);
+        break;
+    case LOGTYPE_UNKNOWN:
+    case LOGTYPE_HEX:
+    default:
+        wininet_log_data_hex(a_pData, a_pBuf, a_nBufLen);
+        break;
+    }
+
     fputc('\n', a_pData->hLog);
     fflush(a_pData->hLog);
 }
@@ -286,7 +552,7 @@ wininet_set_timeout(
     BOOL bSuccess;
 
     if (a_nTimeout < 1) {
-        a_nTimeout = 60 * 60; // unlimited = 1 hour = 60 mins x 60 secs
+        a_nTimeout = 60 * 60; /* unlimited = 1 hour = 60 mins x 60 secs */
     }
     dwTimeout = a_nTimeout * 1000;
 
@@ -350,7 +616,7 @@ wininet_callback(
 {
     struct soap * soap = (struct soap *) dwContext;
     char buf[500] = { 0 };
-    const DWORD * pdw = (const DWORD *) lpvStatusInformation; // sometimes
+    const DWORD * pdw = (const DWORD *) lpvStatusInformation; /* sometimes */
     struct wininet_data * pData = (struct wininet_data *) 
         soap_lookup_plugin(soap, wininet_id);
 
@@ -538,18 +804,20 @@ wininet_delete(
     /* force a disconnect of any existing connection */
     pData->bDisconnect = TRUE;
     wininet_have_connection(soap, pData);
-
-    /* close down the internet connection */
     if (pData->hInternet) {
-        WININET_LOG0(pData, "delete: closing internet handle");
         InternetCloseHandle(pData->hInternet);
-        pData->hInternet = NULL;
     }
 
     /* free our data */
     wininet_free_error_message(pData);
+    if (pData->pBuffer) {
+        free(pData->pBuffer);
+    }
     if (pData->pUrlPath) {
         free(pData->pUrlPath);
+    }
+    if (pData->pUserAgent) {
+        free(pData->pUserAgent);
     }
     if (pData->hLog) {
         fclose(pData->hLog);
@@ -650,7 +918,7 @@ wininet_fopen(
         return SOAP_INVALID_SOCKET;
     }
 
-    // return 0 as our "connected" socket type
+    /* return 0 as our "connected" socket type */
     WININET_LOG0(pData, "fopen: connected");
     return 0;
 }
@@ -671,7 +939,7 @@ wininet_create_request(
         dwFlags |= INTERNET_FLAG_KEEP_CONNECTION;
     }
 
-    if (pData && pData->hLog) {
+    if (pData->hLog) {
         char buf[1000] = { 0 };
 
 #define LOGFLAG(flag) if (dwFlags & INTERNET_FLAG_ ## flag) strcat(buf, ", " #flag);
@@ -705,7 +973,7 @@ wininet_create_request(
         LOGFLAG(TRANSFER_BINARY)
         LOGFLAG(TRANSFER_ASCII)
         LOGFLAG(FWD_BACK)
-        //LOGFLAG(INTERNET_FLAG_BGUPDATE)
+        /*LOGFLAG(INTERNET_FLAG_BGUPDATE)*/
 #undef LOGFLAG
 
         wininet_log(pData, "create_request: using INTERNET_FLAG_xxx = %s", &buf[2]);
@@ -751,6 +1019,27 @@ wininet_fpoll(
     return SOAP_OK; 
 }
 
+static int
+wininet_growbuffer(
+    struct wininet_data *   a_pData,
+    const char *            a_pModule,
+    DWORD                   a_dwSize
+    )
+{
+    a_pData->uiBufferSize = ROUND_UP(a_dwSize, 4096); /* round up to 4096 boundary */
+    WININET_LOG2(a_pData, "%s: growing internal buffer to %lu bytes", 
+        a_pModule, a_pData->uiBufferSize);
+
+    a_pData->pBuffer = (char *) realloc(a_pData->pBuffer, a_pData->uiBufferSize);
+    if (!a_pData->pBuffer) {
+        WININET_LOG1(a_pData, "%s: realloc failed", a_pModule);
+        a_pData->uiBufferSize = 0;
+        return SOAP_EOM;
+    }
+
+    return SOAP_OK;
+}
+
 /* gsoap documentation:
     Called by http_post and http_response (through the callbacks). Emits HTTP 
     key: val header entries. Should return SOAP_OK, or a gSOAP error code. 
@@ -772,16 +1061,17 @@ wininet_fposthdr(
 
     soap->error = SOAP_OK;
 
-    if (pData && pData->hLog) {
-        if (a_pszKey && a_pszValue) {
-            WININET_LOG2(pData, "fposthdr: adding '%s: %s'", a_pszKey, a_pszValue);
+    if (a_pszKey && a_pszValue) {
+        if (!strcmp(a_pszKey, "User-Agent") && pData->pUserAgent) {
+            a_pszValue = pData->pUserAgent;
         }
-        else if (a_pszKey) {
-            WININET_LOG0(pData, "fposthdr: initialize request");
-        }
-        else { 
-            WININET_LOG0(pData, "fposthdr: complete headers");
-        }
+        WININET_LOG2(pData, "fposthdr: header '%s: %s'", a_pszKey, a_pszValue);
+    }
+    else if (a_pszKey) {
+        WININET_LOG0(pData, "fposthdr: initialize request");
+    }
+    else { 
+        WININET_LOG0(pData, "fposthdr: complete headers");
     }
 
     /* ensure that our connection hasn't been disconnected */
@@ -795,6 +1085,7 @@ wininet_fposthdr(
         pData->bIsChunkSize = ((soap->omode & SOAP_IO) == SOAP_IO_CHUNK);
         pData->uiBufferLen = 0;
         pData->uiBufferLenMax = INVALID_BUFFER_LENGTH;
+        pData->nLogFormat = LOGTYPE_UNKNOWN;
 
         /* create new request for these headers */
         rc = wininet_create_request(soap);
@@ -811,13 +1102,25 @@ wininet_fposthdr(
             _ASSERTE(pData->uiBufferLenMax == INVALID_BUFFER_LENGTH);
             pData->uiBufferLenMax = strtoul(a_pszValue, NULL, 10);
             if (pData->uiBufferSize < pData->uiBufferLenMax) {
-                pData->uiBufferSize = ROUND_UP(pData->uiBufferLenMax, 4096); // round up to 4096 boundary
-                pData->pBuffer = (char *) realloc(pData->pBuffer, pData->uiBufferSize);
-                if (!pData->pBuffer) {
-                    pData->uiBufferSize = 0;
-                    return SOAP_EOM;
-                }
-                pData->uiBufferSize = pData->uiBufferLenMax;
+                int rc = wininet_growbuffer(pData, "fposthdr", pData->uiBufferLenMax);
+                if (rc != SOAP_OK) return rc;
+            }
+        }
+
+        /*! check to see what sort of data with have */
+        else if (!strcmp(a_pszKey, "Content-Encoding")) {
+            pData->nLogFormat = LOGTYPE_HEX;
+        }
+
+        else if (pData->nLogFormat == LOGTYPE_UNKNOWN && !strcmp(a_pszKey, "Content-Type")) {
+            if (strstr(a_pszValue, "text/xml")) {
+                pData->nLogFormat = LOGTYPE_XML;
+            }
+            else if (strstr(a_pszValue, "text/")) {
+                pData->nLogFormat = LOGTYPE_TEXT;
+            }
+            else {
+                pData->nLogFormat = LOGTYPE_HEX;
             }
         }
 
@@ -837,6 +1140,53 @@ wininet_fposthdr(
     }
 
     return SOAP_OK; 
+}
+
+static int
+wininet_dump_headers(
+    struct wininet_data *   a_pData,
+    const char *            a_pModule,
+    DWORD                   a_dwFlags
+    )
+{
+    const char * pHeader;
+    DWORD dwLen;
+
+    /* retrieve all of the response headers as NULL separated strings */
+    _ASSERTE(a_pData->uiBufferSize > 0);
+    dwLen = a_pData->uiBufferSize;
+    a_pData->pBuffer[0] = 0;
+    while (!HttpQueryInfoA(a_pData->hRequest, HTTP_QUERY_RAW_HEADERS | a_dwFlags, a_pData->pBuffer, &dwLen, 0) 
+        && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+    {
+        int rc = wininet_growbuffer(a_pData, a_pModule, dwLen);
+        if (rc != SOAP_OK) return rc;
+        dwLen = a_pData->uiBufferSize;
+    }
+
+    /* log all of the headers */
+    for (pHeader = a_pData->pBuffer; *pHeader; pHeader += strlen(pHeader)+1) {
+        WININET_LOG2(a_pData, "%s header '%s'", a_pModule, pHeader);
+
+        /*! check to see what sort of data with have */
+        if (!strnicmp(pHeader, "Content-Encoding:", 17)) {
+            a_pData->nLogFormat = LOGTYPE_HEX;
+        }
+
+        else if (a_pData->nLogFormat == LOGTYPE_UNKNOWN && !strnicmp(pHeader, "Content-Type:", 13)) {
+            if (strstr(pHeader, "text/xml")) {
+                a_pData->nLogFormat = LOGTYPE_XML;
+            }
+            else if (strstr(pHeader, "text/")) {
+                a_pData->nLogFormat = LOGTYPE_TEXT;
+            }
+            else {
+                a_pData->nLogFormat = LOGTYPE_HEX;
+            }
+        }
+    }
+
+    return SOAP_OK;
 }
 
 /* gsoap documentation:
@@ -911,6 +1261,7 @@ wininet_fsend(
         (2) gsoap is sending the entire message at one time. 
      */
     if (a_uiBufferLen == pData->uiBufferLenMax) {
+        WININET_LOG0(pData, "fsend: using gsoap supplied data buffer");
         nSendSize = a_uiBufferLen;
         pSendBuf  = (char *) a_pBuffer;
     }
@@ -924,12 +1275,8 @@ wininet_fsend(
     if (!pSendBuf) {
         size_t uiNewBufferLen = pData->uiBufferLen + a_uiBufferLen;
         if (!pData->pBuffer || uiNewBufferLen > pData->uiBufferSize) {
-            pData->uiBufferSize = ROUND_UP(uiNewBufferLen, 4096); // round up to 4096 boundary
-            pData->pBuffer = (char *) realloc(pData->pBuffer, pData->uiBufferSize);
-            if (!pData->pBuffer) {
-                pData->uiBufferSize = 0;
-                return SOAP_EOM;
-            }
+            int rc = wininet_growbuffer(pData, "fsend", uiNewBufferLen);
+            if (rc != SOAP_OK) return rc;
         }
 
         memcpy(pData->pBuffer + pData->uiBufferLen, a_pBuffer, a_uiBufferLen);
@@ -955,11 +1302,15 @@ wininet_fsend(
         /* message is complete, set the sending buffer */
         nSendSize = pData->uiBufferLen;
         pSendBuf  = pData->pBuffer;
+
+        WININET_LOG3(pData, "fsend: using %d%% (%lu bytes) of %lu byte internal buffer", 
+            (int)((pData->uiBufferLen * 100) / pData->uiBufferSize), 
+            pData->uiBufferLen, pData->uiBufferSize);
     }
 
-    // output the data we are sending
+    /* output the data we are sending */
     WININET_LOG1(pData, "fsend: sending message %lu bytes", nSendSize);
-    if (pData && pData->hLog && nSendSize > 0) {
+    if (pData->hLog && nSendSize > 0) {
         wininet_log_data(pData, "fsend: message data", pSendBuf, nSendSize);
     }
 
@@ -1037,8 +1388,8 @@ wininet_fsend(
             that we can use it later.
          */
         switch (dwStatusCode) {
-        case HTTP_STATUS_DENIED:            // 401
-        case HTTP_STATUS_PROXY_AUTH_REQ:    // 407
+        case HTTP_STATUS_DENIED:            /* 401 */
+        case HTTP_STATUS_PROXY_AUTH_REQ:    /* 407 */
             errorResolved = rseDisplayDlg;
             WININET_LOG0(pData, "fsend: user authentication required");
             if (pData->pRseCallback) {
@@ -1065,7 +1416,14 @@ wininet_fsend(
         }
     }
 
-    WININET_LOG0(pData, "fsend: complete");
+    /* log the actual headers used */
+    if (pData->hLog) {
+        wininet_dump_headers(pData, "fsend: actual", HTTP_QUERY_FLAG_REQUEST_HEADERS);
+        WININET_LOG0(pData, "fsend: complete");
+    }
+
+    /* signal to frecv that nothing has been received yet */
+    pData->uiBufferLenMax = INVALID_BUFFER_LENGTH;
 
     return nResult; 
 }
@@ -1082,15 +1440,13 @@ wininet_frecv(
     size_t          a_uiBufferLen
     ) 
 { 
-    DWORD       dwBytesRead = 0;
-    size_t      uiTotalBytesRead = 0;
+    DWORD       dwBytesRead;
+    size_t      uiTotalBytesRead;
     BOOL        bResult;
     struct wininet_data * pData = (struct wininet_data *) 
         soap_lookup_plugin(soap, wininet_id);
 
     soap->error = SOAP_OK;
-
-    WININET_LOG1(pData, "frecv: available buffer len = %lu", a_uiBufferLen);
 
     /*  NOTE: we do not check here that our connection hasn't been 
         disconnected because in HTTP/1.0 connections, it will always have been
@@ -1101,6 +1457,20 @@ wininet_frecv(
         from the request handle.
      */
 
+    if (!pData->hRequest) {
+        return SOAP_ERR;
+    }
+
+    /* log this only the first time into recv */
+    if (pData->hLog && pData->uiBufferLenMax == INVALID_BUFFER_LENGTH) {
+        pData->nLogFormat = LOGTYPE_UNKNOWN;
+        pData->uiBufferLenMax = 0; 
+        wininet_dump_headers(pData, "frecv:", 0);
+    }
+
+    dwBytesRead = 0;
+    uiTotalBytesRead = 0;
+    WININET_LOG1(pData, "frecv: available buffer len = %lu", a_uiBufferLen);
     do {
         /* read from the connection up to our maximum amount of data */
         _ASSERTE(a_uiBufferLen <= ULONG_MAX);
@@ -1122,8 +1492,8 @@ wininet_frecv(
 
     WININET_LOG1(pData, "frecv: received %lu bytes", uiTotalBytesRead);
 
-    // output the data we received
-    if (pData && pData->hLog && uiTotalBytesRead > 0) {
+    /* output the data we received */
+    if (pData->hLog && uiTotalBytesRead > 0) {
         wininet_log_data(pData, "frecv: message data", a_pBuffer, uiTotalBytesRead);
     }
 
@@ -1154,26 +1524,30 @@ wininet_setlog_internal(
     return SOAP_OK;
 }
 
-static int 
+/*=============================================================================
+  API Functions
+ ============================================================================*/
+
+/* register and set the logfile */
+int 
 wininet_register(
     struct soap *           soap, 
     struct soap_plugin *    a_pPluginData, 
-    DWORD                   a_dwRequestFlags,
-    const char *            a_pLogFile
+    void *                  a_pLogFile
     )
 {
     struct wininet_data * pData;
     int rc;
 
-    // can't use WININET_LOG0 as we don't exist yet
+    /* can't use WININET_LOG0 as we don't exist yet */
     DBGLOG(TEST, SOAP_MESSAGE(fdebug, "wininet %p: registration\n", soap));
 
     pData = (struct wininet_data *) malloc(sizeof(struct wininet_data));
     if (!pData) return SOAP_EOM;
     memset(pData, 0, sizeof(struct wininet_data));
+    pData->nLogFormat = LOGTYPE_UNKNOWN;
 
-    pData->dwRequestFlags = a_dwRequestFlags;
-    rc = wininet_setlog_internal(pData, a_pLogFile);
+    rc = wininet_setlog_internal(pData, (const char *) a_pLogFile);
     if (rc != SOAP_OK) {
         free(pData);
         return rc;
@@ -1185,6 +1559,13 @@ wininet_register(
         WININET_LOG0(pData, "use of SOAP_IO_STORE is not recommended");
     }
 
+    /* guarantee that we have an internal buffer */
+    rc = wininet_growbuffer(pData, "init", 1);
+    if (rc != SOAP_OK) {
+        wininet_delete(soap, a_pPluginData);
+        return rc;
+    }
+
     /* start our internet session using the standard IE proxy config */
     pData->hInternet = InternetOpenA("gsoap/" WININET_VERSION, 
         INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
@@ -1192,8 +1573,7 @@ wininet_register(
         soap->error = GetLastError();
         WININET_LOG2(pData, "init: error %d (%s) in InternetOpen", 
             soap->error, wininet_error_message(pData, soap->error));
-        wininet_free_error_message(pData);
-        free(pData);
+        wininet_delete(soap, a_pPluginData);
         return FALSE;
     }
 
@@ -1216,24 +1596,6 @@ wininet_register(
     return SOAP_OK;
 }
 
-/*=============================================================================
-  API Functions
- ============================================================================*/
-
-/* set the optional callback */
-extern void 
-wininet_set_rse_callback(
-    struct soap *           soap,
-    wininet_rse_callback    a_pRsecallback
-    )
-{
-    struct wininet_data * pData = (struct wininet_data *) 
-        soap_lookup_plugin(soap, wininet_id);
-
-    WININET_LOG1(pData, "set_rse_callback: callback = '%p'", a_pRsecallback);
-    pData->pRseCallback = a_pRsecallback;
-}
-
 /* start or stop logging */
 int 
 wininet_setlog(
@@ -1245,7 +1607,6 @@ wininet_setlog(
         soap_lookup_plugin(soap, wininet_id);
 
     if (!pData) return SOAP_ERR;
-    WININET_LOG1(pData, "wininet_setlog: new logfile = '%s'", a_pLogFile ? a_pLogFile : "");
     return wininet_setlog_internal(pData, a_pLogFile);
 }
 
@@ -1265,24 +1626,46 @@ wininet_setflags(
     return SOAP_OK;
 }
 
-/* register and set the logfile */
-int 
-wininet_register_logfile(
-    struct soap *           soap, 
-    struct soap_plugin *    a_pPluginData, 
-    void *                  a_pLogFile
+ /* set the optional user-agent string */
+extern int 
+wininet_setagent(
+    struct soap *   soap,
+    const char *    a_pUserAgent
     )
 {
-    return wininet_register(soap, a_pPluginData, 0, (const char *) a_pLogFile);
+    struct wininet_data * pData = (struct wininet_data *) 
+        soap_lookup_plugin(soap, wininet_id);
+
+    if (!pData) return SOAP_ERR;
+    
+    if (pData->pUserAgent) {
+        free(pData->pUserAgent);
+        pData->pUserAgent = NULL;
+    }
+
+    if (a_pUserAgent && *a_pUserAgent) {
+        WININET_LOG1(pData, "setagent: User-Agent = '%s'", a_pUserAgent);
+        pData->pUserAgent = strdup(a_pUserAgent);
+    }
+    else {
+        WININET_LOG0(pData, "setagent: User-Agent = (use default)");
+    }
+
+    return SOAP_OK;
 }
 
-/* register and set the flags */
-int 
-wininet_register_flags(
-    struct soap *           soap, 
-    struct soap_plugin *    a_pPluginData, 
-    void *                  a_dwRequestFlags 
+/* set the optional callback */
+extern int 
+wininet_set_rse_callback(
+    struct soap *           soap,
+    wininet_rse_callback    a_pRsecallback
     )
 {
-    return wininet_register(soap, a_pPluginData, (DWORD)(size_t)a_dwRequestFlags, NULL);
+    struct wininet_data * pData = (struct wininet_data *) 
+        soap_lookup_plugin(soap, wininet_id);
+
+    if (!pData) return SOAP_ERR;
+    WININET_LOG1(pData, "set_rse_callback: callback = '%p'", a_pRsecallback);
+    pData->pRseCallback = a_pRsecallback;
+    return SOAP_OK;
 }
