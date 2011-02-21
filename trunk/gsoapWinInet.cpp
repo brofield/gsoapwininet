@@ -282,19 +282,29 @@ wininet_writetag(
     const char * pBuf    = a_pItem->pStart;
     const char * pBufEnd = pBuf + a_pItem->nLen;
 
-    // wrap text at a maximum line length
+    /* wrap text at a maximum line length, convert CRLF into LF only */
     if (a_pItem->nType == XMLTYPE_TEXT) {
         const size_t linelen = 120;
         size_t len, idx;
+        BOOL newline = FALSE;
 
         while (pBuf < pBufEnd) {
+            /* find end of buffer or end of line */
             for (len = idx = 0; len < linelen && pBuf + idx < pBufEnd; ++idx, ++len) {
-                if (pBuf[idx] == '\n') len = 0;
+                if (pBuf[idx] == '\r' || pBuf[idx] == '\n') {
+                    newline = TRUE;
+                    break;
+                }
             }
             fwrite(pBuf, 1, idx, a_pData->hLog);
             pBuf += idx;
-            if (pBuf < pBufEnd) {
+            if (pBuf < pBufEnd || newline) {
                 fputc('\n', a_pData->hLog);
+                if (*pBuf == '\r') ++pBuf;
+                if (*pBuf == '\n') ++pBuf;
+                newline = FALSE;
+            }
+            if (pBuf < pBufEnd) {
                 wininet_indent(a_pData, a_nIndent);
             }
         }
@@ -306,7 +316,7 @@ wininet_writetag(
         return;
     }
 
-    // find the first attribute
+    /* find the first attribute */
     for (pCurr = pBuf; pCurr < pBufEnd && *pCurr != ' '; ++pCurr);
     for (; pCurr < pBufEnd && *pCurr == ' '; ++pCurr);
     fwrite(pBuf, 1, pCurr - pBuf, a_pData->hLog);
@@ -314,7 +324,7 @@ wininet_writetag(
     a_nIndent += 4;
     pBuf = pCurr;
     while (pBuf < pBufEnd) {
-        // find end of attrib
+        /* find end of attrib */
         for (; pCurr < pBufEnd && *pCurr != '='; ++pCurr);
         if (pCurr < pBufEnd && *pCurr == '=') {
             ++pCurr;
@@ -326,7 +336,7 @@ wininet_writetag(
         if (pCurr < pBufEnd && *pCurr == ' ') ++pCurr;
         if (pCurr < pBufEnd && *pCurr == '>') ++pCurr;
 
-        // output this attrib
+        /* output this attrib */
         fputc('\n', a_pData->hLog);
         wininet_indent(a_pData, a_nIndent);
         fwrite(pBuf, 1, pCurr - pBuf, a_pData->hLog);
@@ -1176,13 +1186,12 @@ wininet_fposthdr(
 }
 
 static int
-wininet_dump_headers(
+wininet_get_headers(
     struct wininet_data *   a_pData,
     const char *            a_pModule,
     DWORD                   a_dwFlags
     )
 {
-    const char * pHeader;
     DWORD dwLen;
 
     /* retrieve all of the response headers as NULL separated strings */
@@ -1196,6 +1205,17 @@ wininet_dump_headers(
         if (rc != SOAP_OK) return rc;
         dwLen = a_pData->uiBufferSize;
     }
+
+    return SOAP_OK;
+}
+
+static void
+wininet_log_headers(
+    struct wininet_data *   a_pData,
+    const char *            a_pModule
+    )
+{
+    const char * pHeader;
 
     /* log all of the headers */
     for (pHeader = a_pData->pBuffer; *pHeader; pHeader += strlen(pHeader)+1) {
@@ -1218,8 +1238,6 @@ wininet_dump_headers(
             }
         }
     }
-
-    return SOAP_OK;
 }
 
 /* gsoap documentation:
@@ -1451,7 +1469,9 @@ wininet_fsend(
 
     /* log the actual headers used */
     if (pData->hLog) {
-        wininet_dump_headers(pData, "fsend: actual", HTTP_QUERY_FLAG_REQUEST_HEADERS);
+        int rc = wininet_get_headers(pData, "fsend: actual", HTTP_QUERY_FLAG_REQUEST_HEADERS);
+        if (rc != SOAP_OK) return rc;
+        wininet_log_headers(pData, "fsend: actual");
         WININET_LOG0(pData, "fsend: complete");
     }
 
@@ -1473,9 +1493,10 @@ wininet_frecv(
     size_t          a_uiBufferLen
     ) 
 { 
-    DWORD       dwBytesRead;
-    size_t      uiTotalBytesRead;
-    BOOL        bResult;
+    DWORD   dwBytesRead;
+    size_t  uiTotalBytesRead;
+    BOOL    bResult;
+    int     rc;
     struct wininet_data * pData = (struct wininet_data *) 
         soap_lookup_plugin(soap, wininet_id);
 
@@ -1493,17 +1514,49 @@ wininet_frecv(
     if (!pData->hRequest) {
         return SOAP_ERR;
     }
+    WININET_LOG1(pData, "frecv: available buffer len = %lu", a_uiBufferLen);
 
-    /* log this only the first time into recv */
-    if (pData->hLog && pData->uiBufferLenMax == INVALID_BUFFER_LENGTH) {
+    uiTotalBytesRead = 0;
+    if (pData->uiBufferLenMax == INVALID_BUFFER_LENGTH) {
+        const char *pHeader, *pHeaderNext = NULL;
+
         pData->nLogFormat = LOGTYPE_UNKNOWN;
         pData->uiBufferLenMax = 0; 
-        wininet_dump_headers(pData, "frecv:", 0);
+
+        /* retrieve all of the response headers */
+        rc = wininet_get_headers(pData, "frecv:", 0);
+        if (rc != SOAP_OK) return rc;
+        if (pData->hLog) {
+            wininet_log_headers(pData, "frecv:");
+        }
+
+        /* size required for end of headers CRLF */
+        if (a_uiBufferLen < 2) {
+            WININET_LOG0(pData, "frecv: buffer too small for headers");
+            return SOAP_EOM;
+        }
+
+        /* pass through all headers to gsoap */
+        for (pHeader = pData->pBuffer; *pHeader; pHeader = pHeaderNext) {
+            pHeaderNext = pHeader + strlen(pHeader)+1;
+
+            dwBytesRead = pHeaderNext - pHeader - 1;
+            if (uiTotalBytesRead + dwBytesRead + 4 > a_uiBufferLen) {
+                WININET_LOG0(pData, "frecv: buffer too small for headers");
+                return SOAP_EOM;
+            }
+
+            memcpy(&a_pBuffer[uiTotalBytesRead], pHeader, dwBytesRead);
+            uiTotalBytesRead += dwBytesRead;
+            a_pBuffer[uiTotalBytesRead++] = '\r'; 
+            a_pBuffer[uiTotalBytesRead++] = '\n';
+        }
+
+        /* terminate the headers */
+        a_pBuffer[uiTotalBytesRead++] = '\r'; 
+        a_pBuffer[uiTotalBytesRead++] = '\n';
     }
 
-    dwBytesRead = 0;
-    uiTotalBytesRead = 0;
-    WININET_LOG1(pData, "frecv: available buffer len = %lu", a_uiBufferLen);
     do {
         /* read from the connection up to our maximum amount of data */
         _ASSERTE(a_uiBufferLen <= ULONG_MAX);
