@@ -121,11 +121,11 @@ wininet_log_data_hex(
         memset(line, ' ', sizeof(line)-2);
         for (n = 0; n < count; ++n) {
             register unsigned char ch = pBuf[idx+n];
-            line[0] = '0' + ((idx / 10000) % 10);
-            line[1] = '0' + ((idx / 1000) % 10);
-            line[2] = '0' + ((idx / 100) % 10);
-            line[3] = '0' + ((idx / 10) % 10);
-            line[4] = '0' + ((idx / 1) % 10);
+            line[0] = '0' + (char) ((idx / 10000) % 10);
+            line[1] = '0' + (char) ((idx / 1000) % 10);
+            line[2] = '0' + (char) ((idx / 100) % 10);
+            line[3] = '0' + (char) ((idx / 10) % 10);
+            line[4] = '0' + (char) ((idx / 1) % 10);
             line[5] = ':';
             line[7+n*3+0+n/8] = hex[ch >> 4];
             line[7+n*3+1+n/8] = hex[ch & 0xF];
@@ -198,14 +198,14 @@ wininet_parsexml(
     if (*a_pBuf != '<') {
         a_pItem->nType = XMLTYPE_TEXT;
         while (a_pBuf < a_pBufEnd && *a_pBuf != '<') ++a_pBuf;
-        a_pItem->nLen = a_pBuf - a_pItem->pStart;
+        a_pItem->nLen = (unsigned) (a_pBuf - a_pItem->pStart);
         a_pItem->nNewLine = (*(a_pBuf-1) == '\n');
         return TRUE;
     }
 
     a_pItem->nType = XMLTYPE_OPEN;
     while (a_pBuf < a_pBufEnd && *a_pBuf != '>') ++a_pBuf;
-    a_pItem->nLen = a_pBuf - a_pItem->pStart;
+    a_pItem->nLen = (unsigned) (a_pBuf - a_pItem->pStart);
     if (a_pBuf < a_pBufEnd) ++a_pItem->nLen; /* include the tag end */
 
     /* anything that doesn't look like a tag is text */
@@ -1049,10 +1049,10 @@ static int
 wininet_growbuffer(
     struct wininet_data *   a_pData,
     const char *            a_pModule,
-    DWORD                   a_dwSize
+    size_t					a_nSize
     )
 {
-    a_pData->uiBufferSize = ROUND_UP(a_dwSize, 4096); /* round up to 4096 boundary */
+    a_pData->uiBufferSize = ROUND_UP(a_nSize, 4096); /* round up to 4096 boundary */
     WININET_LOG2(a_pData, "%s: growing internal buffer to %lu bytes", 
         a_pModule, a_pData->uiBufferSize);
 
@@ -1196,14 +1196,14 @@ wininet_get_headers(
 
     /* retrieve all of the response headers as NULL separated strings */
     _ASSERTE(a_pData->uiBufferSize > 0);
-    dwLen = a_pData->uiBufferSize;
+    dwLen = (DWORD) a_pData->uiBufferSize;
     a_pData->pBuffer[0] = 0;
     while (!HttpQueryInfoA(a_pData->hRequest, HTTP_QUERY_RAW_HEADERS | a_dwFlags, a_pData->pBuffer, &dwLen, 0) 
         && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
     {
         int rc = wininet_growbuffer(a_pData, a_pModule, dwLen);
         if (rc != SOAP_OK) return rc;
-        dwLen = a_pData->uiBufferSize;
+        dwLen = (DWORD) a_pData->uiBufferSize;
     }
 
     return SOAP_OK;
@@ -1512,7 +1512,8 @@ wininet_frecv(
      */
 
     if (!pData->hRequest) {
-        return SOAP_ERR;
+		soap->error = SOAP_ERR;
+        return 0;
     }
     WININET_LOG1(pData, "frecv: available buffer len = %lu", a_uiBufferLen);
 
@@ -1525,7 +1526,10 @@ wininet_frecv(
 
         /* retrieve all of the response headers */
         rc = wininet_get_headers(pData, "frecv:", 0);
-        if (rc != SOAP_OK) return rc;
+		if (rc != SOAP_OK) {
+			soap->error = rc;
+			return 0;
+		}
         if (pData->hLog) {
             wininet_log_headers(pData, "frecv:");
         }
@@ -1533,7 +1537,8 @@ wininet_frecv(
         /* size required for end of headers CRLF */
         if (a_uiBufferLen < 2) {
             WININET_LOG0(pData, "frecv: buffer too small for headers");
-            return SOAP_EOM;
+			soap->error = SOAP_EOM;
+			return 0;
         }
 
         /* pass through some headers to gsoap */
@@ -1548,10 +1553,11 @@ wininet_frecv(
                 continue;
             }
 
-            dwBytesRead = pHeaderNext - pHeader - 1;
+            dwBytesRead = (DWORD) (pHeaderNext - pHeader - 1);
             if (uiTotalBytesRead + dwBytesRead + 4 > a_uiBufferLen) {
                 WININET_LOG0(pData, "frecv: buffer too small for headers");
-                return SOAP_EOM;
+				soap->error = SOAP_EOM;
+				return 0;
             }
 
             memcpy(&a_pBuffer[uiTotalBytesRead], pHeader, dwBytesRead);
