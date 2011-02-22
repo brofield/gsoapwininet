@@ -1536,9 +1536,17 @@ wininet_frecv(
             return SOAP_EOM;
         }
 
-        /* pass through all headers to gsoap */
+        /* pass through some headers to gsoap */
         for (pHeader = pData->pBuffer; *pHeader; pHeader = pHeaderNext) {
             pHeaderNext = pHeader + strlen(pHeader)+1;
+
+            /*  don't pass through headers related to transport or authentication 
+                as this has been handled already by the wininet layer. */
+            if (0 == strnicmp(pHeader, "Transfer-Encoding:", 18) ||
+                0 == strnicmp(pHeader, "WWW-Authenticate:", 17))
+            {
+                continue;
+            }
 
             dwBytesRead = pHeaderNext - pHeader - 1;
             if (uiTotalBytesRead + dwBytesRead + 4 > a_uiBufferLen) {
