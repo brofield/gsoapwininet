@@ -1,0 +1,1 @@
+Allow gsoap clients (not servers) to direct all communications through the Windows WinInet API. This automatically provides all of the proxy and authentication features supported by the control panel 'Internet Options' dialog to the client. As these options are shared by IE, this means that "if IE works, gsoap works."
